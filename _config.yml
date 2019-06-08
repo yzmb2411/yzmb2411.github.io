@@ -139,3 +139,5 @@ friends: [
         href: "https://dvcon-china.org/zh-hans"
     }
 ]
+
+theme: jekyll-theme-cayman
