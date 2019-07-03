@@ -168,33 +168,296 @@ sda是IIC总线的串行数据线；
 
 通过观察上面的时序图可以看出，发送一个字节的数据之前必须要先发送起始位，然后发送控制字节，接着等待应答，然后在发送字地址，接着在等待应答。数据发送完毕以后，在等待最后一个应答，应答成功后发送停止信号结束整个过程。所以，根据这个流程，可以归纳出如下几个状态：
 
-状态0：空闲状态，用来初始化各个寄存器的值
+写步骤：
 
-状态1：加载IIC设备的物理地址
+ - a.实现开始信号
 
-状态2：加载IIC设备的字地址
+ - b.发送24LC04B设备地址，从机发送应答信号
 
-状态3：加载要发送的数据
+ - c.发送待存储数据的地址，接受应答信号
 
-状态4：发送起始信号
+ - d.发送待写入数据，接受应答信号
 
-状态5：发送一个字节，从高位开始发送
+ - e.实现结束信号
 
-状态6：接收应答状态的应答位
+读步骤：
 
-状态7：校验应答位
+ - a.实现开始信号
 
-状态8：发送停止信号
+ - b.发送24LC04B设备地址，从机发送应答信号
 
-状态9：IIC写操作结束
+ - c.发送待读取数据的地址，接受应答信号
 
-需要注意的是上面的各个状态并不是按照顺序执行的，有些状态要复用多次，比如状态5发送字节的状态就需要复用三次用来发送三个8-bit的数据；同样，状态6和状态7也要复用多次。
+ - d.实现开始信号
 
-抽象出状态机以后，写代码之前先分析一下代码中要注意的一些关键点：
+ - e.发送24LC04B设备地址，从机发送应答信号
 
-1、由于IIC时序要求数据线SDA在串行时钟线的高电平保持不变，在串行时钟线的低电平才能变化，所以代码里面必须在串行时钟线低电平的正中间产生一个标志位，写代码的时候在这个标志位处改变SDA的值，这样就可以保证SDA在SCL的高电平期间保持稳定了。同理，由于IIC从机(24LC04)在接收到主机(FPGA)发送的有效数据以后会在SCL高电平期间产生一个有效应答信号0，所以为了保证采到的应答信号准确，必须在SCL高电平期间的正中间判断应答信号是否满足条件(0为有效应答，1为无效应答)，因此代码里面还必须在串行时钟线高电平的正中间产生一个标志位，在这个标志下接收应答位并进行校验。
+ - f.读取8位数据
 
-这部分的代码通过一个计数器就很容易实现，代码如下：
+ - g.实现非应答信号
+
+ - h.实现结束信号
+
+通过状态机 i 来切换 IIC 的不同状态， 譬如接收到写命令，状态机ｉ=0 转入 Start 状态，SDA 先变低，再 SCL 变低；状态机ｉ=1 开 始 转 入 写 设 备 地 址 0xA0; 之 后 状 态 机 转 到 ７ 开 始 发 送 ８ 位 的 数 据 ， 其 中 状 态 机 i=7,8,9,10,11,12,13,14 是 IIC 发送８位的数据，然后状态机进入 i=15 等待 IIC 从设备的应答 信号。状态机 i=16 为判断是否有应答，如果有的话状态机转到 i=2 写 IIC 的地址,然后状态机 又是重复ｉ=7,8,9,10,11,12,13,14 发送地址和 i=15 等待应答，i=16 判断应答。最后状态机 i=3 开始发送 IIC 写数据。发送完数据 i=4 发送 Stop 信号。
+
+代码如下：
+
+```verilog
+module iic_com
+(
+    input CLK,
+	 input RSTn,
+	 
+	 input [1:0] Start_Sig,             //read or write command
+	 input [7:0] Addr_Sig,              //eeprom words address
+	 input [7:0] WrData,                //eeprom write data
+	 output [7:0] RdData,               //eeprom read data
+	 output Done_Sig,                   //eeprom read/write finish
+	 
+	 output SCL,                        //sda和scl其实是用来作为仿真信号添加在这里的，寄存器信号都用rscl和rsda表示了，最后用assign将rscl和rsda赋值给sda和scl，连到模块外部仿真用
+	 inout SDA                          //sda表示当前sda的in或out的值
+	 
+);
+
+parameter F250K = 9'd200;                //250Khz的时钟分频系数              
+	 
+reg [4:0]i;                              //状态机
+reg [4:0]Go;
+reg [8:0]C1;                             //计数器cnt
+reg [7:0]rData;                          //存放任意8位数据的寄存器。在读的最后一步，还会将读到的8位sda存起来赋值给rd_data
+reg rSCL;                                //用来寄存SCL
+reg rSDA;                                //用来寄存任意一位sda
+reg isAck;                               //临时存放ACK信号用于判断
+reg isDone;                              //寄存读写结束信号
+reg isOut;	
+ 
+assign Done_Sig = isDone;
+assign RdData = rData;
+assign SCL = rSCL;
+assign SDA = isOut ? rSDA : 1'bz;        //SDA数据输出选择，SDA的数据输出受到SCL的控制，SCL为高时SDA保持不变，在接收应答位期间SDA也受到控制
+
+//****************************************// 
+//*             I2C读写处理程序            *// 
+//****************************************// 
+always @ ( posedge CLK or negedge RSTn )
+	 if( !RSTn )  begin
+			i <= 5'd0;
+			Go <= 5'd0;
+			C1 <= 9'd0;
+			rData <= 8'd0;
+			rSCL <= 1'b1;       //数据线和时钟线保持高电平初始值
+			rSDA <= 1'b1;
+			isAck <= 1'b1;      //信号为低电平时规定为有效应答，高电平为非有效应答
+			isDone <= 1'b0;
+			isOut <= 1'b1;
+	 end
+	 else if( Start_Sig[0] )                     //I2C 数据写
+	     case( i )
+				    
+		    0: //发送IIC开始信号
+			 begin
+					isOut <= 1;                         //SDA端口输出
+					
+					if( C1 == 0 ) rSCL <= 1'b1;
+					else if( C1 == 200 ) rSCL <= 1'b0;       //SCL由高变低   分频系数为200，计数到200表明经过一个新的时钟周期时钟线变为低电平。
+							  
+					if( C1 == 0 ) rSDA <= 1'b1; 
+					else if( C1 == 100 ) rSDA <= 1'b0;        //SDA先于SCL由高变低，符合信号开始发送条件 
+							  
+					if( C1 == 250 -1) begin C1 <= 9'd0; i <= i + 1'b1; end   //i=0用来表示开始信号发送，根据SDA与SCL变化可得，此处C1到达249,表示又过了四分之一个新时钟周期，i+1，运行下一步
+					else C1 <= C1 + 1'b1;
+			 end
+					  
+			 1: // Write Device Addr
+			 begin rData <= {4'b1010, 3'b000, 1'b0}; i <= 5'd7; Go <= i + 1'b1; end     //1010是EEPROM型号，000是这颗EEPROM地址（三个引脚全部接地），0表示/W（写）    
+				 
+			 2: // Wirte Word Addr
+			 begin rData <= Addr_Sig; i <= 5'd7; Go <= i + 1'b1; end
+					
+			 3: // Write Data
+			 begin rData <= WrData; i <= 5'd7; Go <= i + 1'b1; end
+	 
+			 4: //发送IIC停止信号
+			 begin
+			    isOut <= 1'b1;
+						  
+			    if( C1 == 0 ) rSCL <= 1'b0;
+			    else if( C1 == 50 ) rSCL <= 1'b1;     //SCL先由低变高       
+		
+				 if( C1 == 0 ) rSDA <= 1'b0;
+				 else if( C1 == 150 ) rSDA <= 1'b1;     //SDA由低变高  
+					 	  
+				 if( C1 == 250 -1 ) begin C1 <= 9'd0; i <= i + 1'b1; end
+				 else C1 <= C1 + 1'b1; 
+			 end
+					 
+			 5:
+			 begin isDone <= 1'b1; i <= i + 1'b1; end       //写I2C 结束
+					 
+			 6: 
+			 begin isDone <= 1'b0; i <= 5'd0; end
+				 
+			 7,8,9,10,11,12,13,14:                         //发送Device Addr/Word Addr/Write Data
+			 begin
+			     isOut <= 1'b1;                            //isout =1, SDA=rSDA
+				  rSDA <= rData[14-i];                      //高位先发送
+					  
+				  if( C1 == 0 ) rSCL <= 1'b0;
+			     else if( C1 == 50 ) rSCL <= 1'b1;         //SCL高电平100个时钟周期,低电平100个时钟周期
+				  else if( C1 == 150 ) rSCL <= 1'b0; 
+						  
+				  if( C1 == F250K -1 ) begin C1 <= 9'd0; i <= i + 1'b1; end     //产生250Khz的IIC时钟
+				  else C1 <= C1 + 1'b1;
+			 end
+					 
+			 15:                                          // waiting for acknowledge
+			 begin
+			     isOut <= 1'b0;                            //SDA端口改为输入
+			     if( C1 == 100 ) isAck <= SDA;             //读取IIC 从设备的应答信号
+						  
+				  if( C1 == 0 ) rSCL <= 1'b0;
+				  else if( C1 == 50 ) rSCL <= 1'b1;         //SCL高电平100个时钟周期,低电平100个时钟周期
+				  else if( C1 == 150 ) rSCL <= 1'b0;
+						  
+				  if( C1 == F250K -1 ) begin C1 <= 9'd0; i <= i + 1'b1; end    //产生250Khz的IIC时钟
+				  else C1 <= C1 + 1'b1; 
+			 end
+					 
+			 16:
+			 if( isAck != 0 ) i <= 5'd0;
+			 else i <= Go; 
+					
+  		    endcase
+	
+	  else if( Start_Sig[1] )                     //I2C 数据读
+		    case( i )
+				
+			 0: // Start
+			 begin
+			      isOut <= 1;                      //SDA端口输出
+					      
+			      if( C1 == 0 ) rSCL <= 1'b1;
+			 	   else if( C1 == 200 ) rSCL <= 1'b0;      //SCL由高变低
+						  
+					if( C1 == 0 ) rSDA <= 1'b1; 
+					else if( C1 == 100 ) rSDA <= 1'b0;     //SDA先由高变低 
+						  
+					if( C1 == 250 -1 ) begin C1 <= 9'd0; i <= i + 1'b1; end
+					 else C1 <= C1 + 1'b1;
+			 end
+					  
+			 1: // Write Device Addr(设备地址)
+			 begin rData <= {4'b1010, 3'b000, 1'b0}; i <= 5'd9; Go <= i + 1'b1; end
+					 
+			 2: // Wirte Word Addr(EEPROM的写地址)
+			 begin rData <= Addr_Sig; i <= 5'd9; Go <= i + 1'b1; end
+					
+			 3: // Start again
+			 begin
+			     isOut <= 1'b1;
+					      
+			     if( C1 == 0 ) rSCL <= 1'b0;
+				  else if( C1 == 50 ) rSCL <= 1'b1; 
+				  else if( C1 == 250 ) rSCL <= 1'b0;
+						  
+			     if( C1 == 0 ) rSDA <= 1'b0; 
+				  else if( C1 == 50 ) rSDA <= 1'b1;
+				  else if( C1 == 150 ) rSDA <= 1'b0;  
+						  
+				  if( C1 == 300 -1 ) begin C1 <= 9'd0; i <= i + 1'b1; end
+				  else C1 <= C1 + 1'b1;
+			 end
+					 
+			 4: // Write Device Addr ( Read )
+			 begin rData <= {4'b1010, 3'b000, 1'b1}; i <= 5'd9; Go <= i + 1'b1; end
+					
+			 5: // Read Data
+			 begin rData <= 8'd0; i <= 5'd19; Go <= i + 1'b1; end
+				 
+			 6: // Stop
+			 begin
+			     isOut <= 1'b1;
+			     if( C1 == 0 ) rSCL <= 1'b0;
+				  else if( C1 == 50 ) rSCL <= 1'b1; 
+		
+				  if( C1 == 0 ) rSDA <= 1'b0;
+				  else if( C1 == 150 ) rSDA <= 1'b1;
+					 	  
+				  if( C1 == 250 -1 ) begin C1 <= 9'd0; i <= i + 1'b1; end
+				  else C1 <= C1 + 1'b1; 
+			 end
+					 
+			 7:                                                       //写I2C 结束
+			 begin isDone <= 1'b1; i <= i + 1'b1; end
+					 
+			 8: 
+			 begin isDone <= 1'b0; i <= 5'd0; end
+				 
+					
+			 9,10,11,12,13,14,15,16:                                  //发送Device Addr(write)/Word Addr/Device Addr(read)
+			 begin
+			      isOut <= 1'b1;					      
+			 	   rSDA <= rData[16-i];                                //高位先发送
+						  
+				   if( C1 == 0 ) rSCL <= 1'b0;
+					else if( C1 == 50 ) rSCL <= 1'b1;                   //SCL高电平100个时钟周期,低电平100个时钟周期
+					else if( C1 == 150 ) rSCL <= 1'b0; 
+						  
+					if( C1 == F250K -1 ) begin C1 <= 9'd0; i <= i + 1'b1; end   //产生250Khz的IIC时钟
+					else C1 <= C1 + 1'b1;
+			 end
+			       
+			 17: // waiting for acknowledge
+			 begin
+			      isOut <= 1'b0;                                       //SDA端口改为输入
+					     
+			 	   if( C1 == 100 ) isAck <= SDA;                        //读取IIC 的应答信号
+						  
+					if( C1 == 0 ) rSCL <= 1'b0;
+					else if( C1 == 50 ) rSCL <= 1'b1;                 //SCL高电平100个时钟周期,低电平100个时钟周期
+					else if( C1 == 150 ) rSCL <= 1'b0;
+						  
+					if( C1 == F250K -1 ) begin C1 <= 9'd0; i <= i + 1'b1; end     //产生250Khz的IIC时钟
+					else C1 <= C1 + 1'b1; 
+			 end
+					 
+			 18:
+			      if( isAck != 0 ) i <= 5'd0;
+					else i <= Go;
+					 
+					 
+			 19,20,21,22,23,24,25,26: // Read data
+			 begin
+			     isOut <= 1'b0;
+			     if( C1 == 100 ) rData[26-i] <= SDA;                              //高位先接收
+						  
+				  if( C1 == 0 ) rSCL <= 1'b0;
+				  else if( C1 == 50 ) rSCL <= 1'b1;                  //SCL高电平100个时钟周期,低电平100个时钟周期
+				  else if( C1 == 150 ) rSCL <= 1'b0; 
+						  
+				  if( C1 == F250K -1 ) begin C1 <= 9'd0; i <= i + 1'b1; end     //产生250Khz的IIC时钟
+				  else C1 <= C1 + 1'b1;
+			 end	  
+					 
+			 27: // no acknowledge
+			 begin
+			     isOut <= 1'b1;
+					  
+				  if( C1 == 0 ) rSCL <= 1'b0;
+				  else if( C1 == 50 ) rSCL <= 1'b1;
+				  else if( C1 == 150 ) rSCL <= 1'b0;
+						  
+				  if( C1 == F250K -1 ) begin C1 <= 9'd0; i <= Go; end
+				  else C1 <= C1 + 1'b1; 
+			end
+				
+			endcase		
+		
+
+	
+				
+endmodule
+
 
 
 
