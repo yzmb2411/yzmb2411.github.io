@@ -64,3 +64,41 @@ SPI总线传输一共有4中模式，这4种模式分别由时钟极性(CPOL，C
 ![image](https://wx4.sinaimg.cn/mw1024/ab20a024ly1g4mjugoldhj20kf0atacs.jpg)
 
 下面以模式0为例用Verilog编写SPI通信的代码。
+
+## 目标任务
+
+1、编写SPI通信的Verilog代码并利用ModelSim进行时序仿真
+
+2、阅读Qual SPI的芯片手册，理解操作时序，并利用任务1编写的代码与Qual SPI进行SPI通信，读出Qual SPI Flash的Manufacturer/Device  ID
+
+3、用SPI总线把存放在ROM里面的数据发出去，这在实际项目中用来配置SPI外设芯片很有用
+
+## 设计思路与Verilog代码编写
+
+SPI模块的接口定义与整体设计
+
+Verilog编写的SPI模块除了进行SPI通信的四根线以外还要包括一些时钟、复位、使能、并行的输入输出以及完成标志位。其框图如下所示
+
+![image](https://wx2.sinaimg.cn/mw1024/ab20a024ly1g4mjugmx2gj20h10fot9q.jpg)
+
+其中：
+
+　　I_clk是系统时钟；
+
+　　I_rst_n是系统复位；
+
+　　I_tx_en是主机给从机发送数据的使能信号，当I_tx_en为1时主机才能给从机发送数据；
+
+　　I_rx _en是主机从从机接收数据的使能信号，当I_rx_en为1时主机才能从从机接收数据；
+
+　　I_data_in是主机要发送的并行数据；
+
+　　O_data_out是把从机接收回来的串行数据并行化以后的并行数据；
+
+　　O_tx_done是主机给从机发送数据完成的标志位，发送完成后会产生一个高脉冲；
+
+　　O_rx_done是主机从从机接收数据完成的标志位，接收完成后会产生一个高脉冲；
+
+　　I_spi_miso、O_spi_cs、O_spi_sck和O_spi_mosi是标准SPI总线协议规定的四根线；
+
+　　要想实现上文模式0的时序，最简单的办法还是设计一个状态机。为了方便说明，这里把模式0的时序再在下面贴一遍
