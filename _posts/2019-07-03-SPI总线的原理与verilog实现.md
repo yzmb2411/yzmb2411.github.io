@@ -89,7 +89,7 @@ Verilog编写的SPI模块除了进行SPI通信的四根线以外还要包括一�
 
 　　I_tx_en是主机给从机发送数据的使能信号，当I_tx_en为1时主机才能给从机发送数据；
 
-　　I_rx _en是主机从从机接收数据的使能信号，当I_rx_en为1时主机才能从从机接收数据；
+　　I_rx_en是主机从从机接收数据的使能信号，当I_tx_en为1时主机才能从从机接收数据；
 
 　　I_data_in是主机要发送的并行数据；
 
@@ -102,3 +102,272 @@ Verilog编写的SPI模块除了进行SPI通信的四根线以外还要包括一�
 　　I_spi_miso、O_spi_cs、O_spi_sck和O_spi_mosi是标准SPI总线协议规定的四根线；
 
 　　要想实现上文模式0的时序，最简单的办法还是设计一个状态机。为了方便说明，这里把模式0的时序再在下面贴一遍
+
+![image](https://wx1.sinaimg.cn/mw1024/ab20a024ly1g4mjugseq6j20nh0ditda.jpg)
+
+由于是要用FPGA去控制或读写QSPI Flash，所以FPGA是SPI主机，QSPI是SPI从机。
+
+　　发送：当FPGA通过SPI总线往QSPI Flash中发送一个字节(8-bit)的数据时，首先FPGA把CS/SS片选信号设置为0，表示准备开始发送数据，整个发送数据过程其实可以分为16个状态：
+
+　　　　状态0：SCK为0，MOSI为要发送的数据的最高位，即I_data_in[7]
+
+　　　　状态1：SCK为1，MOSI保持不变
+
+　　　　状态2：SCK为0，MOSI为要发送的数据的次高位，即I_data_in[6]
+
+　　　　状态3：SCK为1，MOSI保持不变
+
+　　　　状态4：SCK为0，MOSI为要发送的数据的下一位，即I_data_in[5]
+
+　　　　状态5：SCK为1，MOSI保持不变
+
+　　　　状态6：SCK为0，MOSI为要发送的数据的下一位，即I_data_in[4]
+
+　　　　状态7：SCK为1，MOSI保持不变
+
+　　　　状态8：SCK为0，MOSI为要发送的数据的下一位，即I_data_in[3]
+
+　　　　状态9：SCK为1，MOSI保持不变
+
+　　　　状态10：SCK为0，MOSI为要发送的数据的下一位，即I_data_in[2]
+
+　　　　状态11：SCK为1，MOSI保持不变
+
+　　　　状态12：SCK为0，MOSI为要发送的数据的下一位，即I_data_in[1]
+
+　　　　状态13：SCK为1，MOSI保持不变
+
+　　　　状态14：SCK为0，MOSI为要发送的数据的最低位，即I_data_in[0]
+
+　　　　状态15：SCK为1，MOSI保持不变
+
+一个字节数据发送完毕以后，产生一个发送完成标志位O_tx_done并把CS/SS信号拉高完成一次发送。通过观察上面的状态可以发现状态编号为奇数的状态要做的操作实际上是一模一样的，所以写代码的时候为了精简代码，可以把状态号为奇数的状态全部整合到一起。
+
+　　接收：当FPGA通过SPI总线从QSPI Flash中接收一个字节(8-bit)的数据时，首先FPGA把CS/SS片选信号设置为0，表示准备开始接收数据，整个接收数据过程其实也可以分为16个状态，但是与发送过程不同的是，为了保证接收到的数据准确，必须在数据的正中间采样，也就是说模式0时序图中灰色实线的地方才是代码中锁存数据的地方，所以接收过程的每个状态执行的操作为：
+
+　　　　状态0：SCK为0，不锁存MISO上的数据
+
+　　　　状态1：SCK为1，锁存MISO上的数据，即把MISO上的数据赋值给O_data_out[7]
+
+　　　　状态2：SCK为0，不锁存MISO上的数据
+
+　　　　状态3：SCK为1，锁存MISO上的数据，即把MISO上的数据赋值给O_data_out[6]
+
+　　　　状态4：SCK为0，不锁存MISO上的数据
+
+　　　　状态5：SCK为1，锁存MISO上的数据，即把MISO上的数据赋值给O_data_out[5]
+
+　　　　状态6：SCK为0，不锁存MISO上的数据
+
+　　　　状态7：SCK为1，锁存MISO上的数据，即把MISO上的数据赋值给O_data_out[4]
+
+　　　　状态8：SCK为0，不锁存MISO上的数据
+
+　　　　状态9：SCK为1，锁存MISO上的数据，即把MISO上的数据赋值给O_data_out[3]
+
+　　　　状态10：SCK为0，不锁存MISO上的数据
+
+　　　　状态11：SCK为1，锁存MISO上的数据，即把MISO上的数据赋值给O_data_out[2]
+
+　　　　状态12：SCK为0，不锁存MISO上的数据
+
+　　　　状态13：SCK为1，锁存MISO上的数据，即把MISO上的数据赋值给O_data_out[1]
+
+　　　　状态14：SCK为0，不锁存MISO上的数据
+
+　　　　状态15：SCK为1，锁存MISO上的数据，即把MISO上的数据赋值给O_data_out[0]
+
+一个字节数据接收完毕以后，产生一个接收完成标志位O_rx_done并把CS/SS信号拉高完成一次数据的接收。通过观察上面的状态可以发现状态编号为偶数的状态要做的操作实际上是一模一样的，所以写代码的时候为了精简代码，可以把状态号为偶数的状态全部整合到一起。而这一点刚好与发送过程的状态刚好相反。
+
+思路理清楚以后就可以直接编写Verilog代码了，spi_module模块的代码如下：
+
+```verilog
+module spi_module
+(
+    input               I_clk       , // 全局时钟50MHz
+    input               I_rst_n     , // 复位信号，低电平有效
+    input               I_rx_en     , // 读使能信号
+    input               I_tx_en     , // 发送使能信号
+    input        [7:0]  I_data_in   , // 要发送的数据
+    output  reg  [7:0]  O_data_out  , // 接收到的数据
+    output  reg         O_tx_done   , // 发送一个字节完毕标志位
+    output  reg         O_rx_done   , // 接收一个字节完毕标志位
+    
+    // 四线标准SPI信号定义
+    input               I_spi_miso  , // SPI串行输入，用来接收从机的数据
+    output  reg         O_spi_sck   , // SPI时钟
+    output  reg         O_spi_cs    , // SPI片选信号
+    output  reg         O_spi_mosi    // SPI输出，用来给从机发送数据          
+);
+
+reg [3:0]   R_tx_state      ; 
+reg [3:0]   R_rx_state      ;
+
+always @(posedge I_clk or negedge I_rst_n)
+begin
+    if(!I_rst_n)
+        begin
+            R_tx_state  <=  4'd0    ;
+            R_rx_state  <=  4'd0    ;
+            O_spi_cs    <=  1'b1    ;
+            O_spi_sck   <=  1'b0    ;
+            O_spi_mosi  <=  1'b0    ;
+            O_tx_done   <=  1'b0    ;
+            O_rx_done   <=  1'b0    ;
+            O_data_out  <=  8'd0    ;
+        end 
+    else if(I_tx_en) // 发送使能信号打开的情况下
+        begin
+            O_spi_cs    <=  1'b0    ; // 把片选CS拉低
+            case(R_tx_state)
+                4'd1, 4'd3 , 4'd5 , 4'd7  , 
+                4'd9, 4'd11, 4'd13, 4'd15 : //整合奇数状态
+                    begin
+                        O_spi_sck   <=  1'b1                ;
+                        R_tx_state  <=  R_tx_state + 1'b1   ;
+                        O_tx_done   <=  1'b0                ;
+                    end
+                4'd0:    // 发送第7位
+                    begin
+                        O_spi_mosi  <=  I_data_in[7]        ;
+                        O_spi_sck   <=  1'b0                ;
+                        R_tx_state  <=  R_tx_state + 1'b1   ;
+                        O_tx_done   <=  1'b0                ;
+                    end
+                4'd2:    // 发送第6位
+                    begin
+                        O_spi_mosi  <=  I_data_in[6]        ;
+                        O_spi_sck   <=  1'b0                ;
+                        R_tx_state  <=  R_tx_state + 1'b1   ;
+                        O_tx_done   <=  1'b0                ;
+                    end
+                4'd4:    // 发送第5位
+                    begin
+                        O_spi_mosi  <=  I_data_in[5]        ;
+                        O_spi_sck   <=  1'b0                ;
+                        R_tx_state  <=  R_tx_state + 1'b1   ;
+                        O_tx_done   <=  1'b0                ;
+                    end 
+                4'd6:    // 发送第4位
+                    begin
+                        O_spi_mosi  <=  I_data_in[4]        ;
+                        O_spi_sck   <=  1'b0                ;
+                        R_tx_state  <=  R_tx_state + 1'b1   ;
+                        O_tx_done   <=  1'b0                ;
+                    end 
+                4'd8:    // 发送第3位
+                    begin
+                        O_spi_mosi  <=  I_data_in[3]        ;
+                        O_spi_sck   <=  1'b0                ;
+                        R_tx_state  <=  R_tx_state + 1'b1   ;
+                        O_tx_done   <=  1'b0                ;
+                    end                            
+                4'd10:    // 发送第2位
+                    begin
+                        O_spi_mosi  <=  I_data_in[2]        ;
+                        O_spi_sck   <=  1'b0                ;
+                        R_tx_state  <=  R_tx_state + 1'b1   ;
+                        O_tx_done   <=  1'b0                ;
+                    end 
+                4'd12:    // 发送第1位
+                    begin
+                        O_spi_mosi  <=  I_data_in[1]        ;
+                        O_spi_sck   <=  1'b0                ;
+                        R_tx_state  <=  R_tx_state + 1'b1   ;
+                        O_tx_done   <=  1'b0                ;
+                    end 
+                4'd14:    // 发送第0位
+                    begin
+                        O_spi_mosi  <=  I_data_in[0]        ;
+                        O_spi_sck   <=  1'b0                ;
+                        R_tx_state  <=  R_tx_state + 1'b1   ;
+                        O_tx_done   <=  1'b1                ;
+                    end
+                default:R_tx_state  <=  4'd0                ;   
+            endcase 
+        end
+    else if(I_rx_en) // 接收使能信号打开的情况下
+        begin
+            O_spi_cs    <=  1'b0        ; // 拉低片选信号CS
+            case(R_rx_state)
+                4'd0, 4'd2 , 4'd4 , 4'd6  , 
+                4'd8, 4'd10, 4'd12, 4'd14 : //整合偶数状态
+                    begin
+                        O_spi_sck   　　 <=  1'b0                ;
+                        R_rx_state  　　 <=  R_rx_state + 1'b1   ;
+                        O_rx_done   　　 <=  1'b0                ;
+                    end
+                4'd1:    // 接收第7位
+                    begin                       
+                        O_spi_sck       <=  1'b1                ;
+                        R_rx_state      <=  R_rx_state + 1'b1   ;
+                        O_rx_done       <=  1'b0                ;
+                        O_data_out[7]   <=  I_spi_miso          ;   
+                    end
+                4'd3:    // 接收第6位
+                    begin
+                        O_spi_sck       <=  1'b1                ;
+                        R_rx_state      <=  R_rx_state + 1'b1   ;
+                        O_rx_done       <=  1'b0                ;
+                        O_data_out[6]   <=  I_spi_miso          ; 
+                    end
+                4'd5:    // 接收第5位
+                    begin
+                        O_spi_sck       <=  1'b1                ;
+                        R_rx_state      <=  R_rx_state + 1'b1   ;
+                        O_rx_done       <=  1'b0                ;
+                        O_data_out[5]   <=  I_spi_miso          ; 
+                    end 
+                4'd7:    // 接收第4位
+                    begin
+                        O_spi_sck       <=  1'b1                ;
+                        R_rx_state      <=  R_rx_state + 1'b1   ;
+                        O_rx_done       <=  1'b0                ;
+                        O_data_out[4]   <=  I_spi_miso          ; 
+                    end 
+                4'd9:    // 接收第3位
+                    begin
+                        O_spi_sck       <=  1'b1                ;
+                        R_rx_state      <=  R_rx_state + 1'b1   ;
+                        O_rx_done       <=  1'b0                ;
+                        O_data_out[3]   <=  I_spi_miso          ; 
+                    end                            
+                4'd11:    // 接收第2位
+                    begin
+                        O_spi_sck       <=  1'b1                ;
+                        R_rx_state      <=  R_rx_state + 1'b1   ;
+                        O_rx_done       <=  1'b0                ;
+                        O_data_out[2]   <=  I_spi_miso          ; 
+                    end 
+                4'd13:    // 接收第1位
+                    begin
+                        O_spi_sck       <=  1'b1                ;
+                        R_rx_state      <=  R_rx_state + 1'b1   ;
+                        O_rx_done       <=  1'b0                ;
+                        O_data_out[1]   <=  I_spi_miso          ; 
+                    end 
+                4'd15:    // 接收第0位
+                    begin
+                        O_spi_sck       <=  1'b1                ;
+                        R_rx_state      <=  R_rx_state + 1'b1   ;
+                        O_rx_done       <=  1'b1                ;
+                        O_data_out[0]   <=  I_spi_miso          ; 
+                    end
+                default:R_rx_state  <=  4'd0                    ;   
+            endcase 
+        end    
+    else
+        begin
+            R_tx_state  <=  4'd0    ;
+            R_rx_state  <=  4'd0    ;
+            O_tx_done   <=  1'b0    ;
+            O_rx_done   <=  1'b0    ;
+            O_spi_cs    <=  1'b1    ;
+            O_spi_sck   <=  1'b0    ;
+            O_spi_mosi  <=  1'b0    ;
+            O_data_out  <=  8'd0    ;
+        end      
+end
+
+endmodule
+```
