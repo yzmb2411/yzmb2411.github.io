@@ -29,7 +29,7 @@ endmodule
 
 elaborate结果
 
-![image](C:/Users/pc/Documents/GitHub/yzmb2411.github.io/img/latch1.png)
+![image](https://github.com/yzmb2411/yzmb2411.github.io/blob/master/img/latch1.png)
 
 Vivado工具elaborate之后，可以看出上述代码是一个纯组合逻辑，满足逻辑关系
 
